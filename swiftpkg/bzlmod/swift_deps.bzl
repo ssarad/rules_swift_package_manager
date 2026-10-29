@@ -1034,7 +1034,7 @@ _configure_explicit_modules_tag = tag_class(
         key: attr.bool(
             default = False,
             doc = """\
-Opt in to {} inference. Reserved configuration: inference is not implemented yet.\
+Opt in to {} inference. Binary-target inference reads public XCFramework Swift interfaces; SDK inference remains reserved.\
 """.format(
                 "SDK dependency" if key == "system_sdk_deps" else "binary-target dependency",
             ),
@@ -1053,7 +1053,7 @@ _inference_override_attrs = {
         values = ["inherit", "on", "off"],
         doc = """\
 Root-only package override for {}: inherit the global default, enable, or \
-disable. Inference is not implemented yet.\
+disable. Binary-target inference reads public XCFramework Swift interfaces; SDK inference remains reserved.\
 """.format(key),
     )
     for key in _INFERENCE_KEYS

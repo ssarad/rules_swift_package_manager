@@ -2,6 +2,8 @@
 
 load("@bazel_skylib//lib:unittest.bzl", "asserts", "unittest")
 load("//swiftpkg/internal:bazel_target_mods.bzl", "bazel_target_mods")
+load("//swiftpkg/internal:pkg_ctxs.bzl", "pkg_ctxs")
+load("//swiftpkg/internal:pkginfos.bzl", "pkginfos")
 load("//swiftpkg/internal:repo_rules.bzl", "repo_rules")
 
 def _download_artifacts_test(ctx):
@@ -225,6 +227,98 @@ gen_build_files_without_build_file_test = unittest.make(
     _gen_build_files_without_build_file_test,
 )
 
+def _binary_inference_generation_test(ctx):
+    env = unittest.begin(ctx)
+
+    def _generate(enabled, manual, interface_basename = "arm64-apple-ios.swiftinterface"):
+        files = []
+        targets = [
+            pkginfos.new_target(
+                name = name,
+                type = "binary",
+                c99name = name,
+                module_type = "BinaryTarget",
+                path = name + ".xcframework",
+                sources = [],
+                dependencies = [],
+                repo_name = "@swiftpkg_binary_test",
+            )
+            for name in ["Importer", "Provider"]
+        ]
+        pkg_info = pkginfos.new(
+            name = "BinaryTest",
+            path = "",
+            tools_version = "5.9",
+            url = "https://example.com/binary-test",
+            version = "1.0.0",
+            dependencies = [],
+            platforms = [],
+            products = [],
+            targets = targets,
+        )
+        pkg_ctx = pkg_ctxs.new(
+            pkg_info = pkg_info,
+            repo_name = "@swiftpkg_binary_test",
+            binary_target_deps = enabled,
+            target_deps = {"Importer": manual} if manual else {},
+        )
+
+        # buildifier: disable=unused-variable
+        def _execute(args, environment = {}, quiet = True):
+            if args[0] == "test":
+                return struct(return_code = 0, stdout = "", stderr = "")
+            if args[0] == "find":
+                base = args[3]
+                if base == ".":
+                    found = []
+                elif base.endswith(".xcframework"):
+                    name = base.removesuffix(".xcframework")
+                    found = [base + "/ios-arm64/" + name + ".framework"]
+                elif base.endswith(".framework"):
+                    name = base.split("/")[-1].removesuffix(".framework")
+                    if "*.swiftinterface" in args:
+                        module_name = "DependencyModule" if name == "Provider" else name
+                        found = [base + "/Modules/" + module_name + ".swiftmodule/" + interface_basename]
+                    else:
+                        found = [base + "/" + name]
+                else:
+                    found = []
+                return struct(return_code = 0, stdout = "\n".join(found), stderr = "")
+            if args[0] == "od":
+                return struct(return_code = 0, stdout = " 21 3c 61 72 63 68 3e 0a\n", stderr = "")
+            return struct(return_code = 0, stdout = "", stderr = "")
+
+        def _read(path):
+            return "import DependencyModule\n" if "Importer.framework" in path else ""
+
+        # buildifier: disable=unused-variable
+        def _file(path, content = "", executable = False, legacy_utf8 = False):
+            files.append(content)
+
+        repository_ctx = struct(
+            attr = struct(build_file = None, bazel_target_mods = ""),
+            name = "swiftpkg_binary_test",
+            execute = _execute,
+            read = _read,
+            file = _file,
+        )
+        repo_rules.gen_build_files(repository_ctx, pkg_ctx)
+        return files[-1]
+
+    enabled = _generate(True, [])
+    disabled = _generate(False, [])
+    manual = _generate(True, ["Provider"])
+    absolute_manual = _generate(True, ["//:Provider"])
+    invalid_basename = _generate(True, [], interface_basename = "arm64.swiftinterface")
+    asserts.true(env, 'deps = [":Provider.rspm"]' in enabled, enabled)
+    asserts.false(env, 'deps = [":Provider.rspm"]' in disabled, disabled)
+    asserts.equals(env, 1, manual.count('":Provider.rspm"'))
+    asserts.false(env, 'deps = [":Provider.rspm"]' in invalid_basename, invalid_basename)
+    asserts.true(env, 'deps = ["//:Provider.rspm"]' in absolute_manual, absolute_manual)
+    return unittest.end(env)
+
+binary_inference_generation_test = unittest.make(_binary_inference_generation_test)
+
 def _make_files_read_only_test(ctx):
     env = unittest.begin(ctx)
 
@@ -309,6 +403,7 @@ def repo_rules_test_suite():
         download_artifacts_test,
         gen_build_files_with_build_file_test,
         gen_build_files_without_build_file_test,
+        binary_inference_generation_test,
         make_files_read_only_disabled_noop_test,
         make_files_read_only_test,
     )

@@ -185,7 +185,196 @@ def _has_import(contents, target_import):
         start_idx = import_range.end
     return False
 
+def _is_identifier_char(char):
+    return (("a" <= char and char <= "z") or ("A" <= char and char <= "Z") or ("0" <= char and char <= "9") or char == "_")
+
+def _has_closing_bare_regex(contents, start):
+    """Checks for an unescaped closing slash before the next line break."""
+    escaped = False
+    for idx in range(start + 1, len(contents)):
+        char = contents[idx]
+        if char == "\n":
+            return False
+        if char == "/" and not escaped:
+            return True
+        if char == "\\":
+            escaped = not escaped
+        else:
+            escaped = False
+    return False
+
+def _masked_swift_source(contents):
+    """Replaces comments and string literals with spaces, preserving newlines."""
+    result = []
+    skip_to = 0
+    comment_depth = 0
+    string_closing = None
+    interpolation_depth = 0
+    interpolation_stack = []
+    for idx in range(len(contents)):
+        char = contents[idx]
+        pair = contents[idx:idx + 2]
+        if idx < skip_to:
+            continue
+        if comment_depth:
+            if pair == "/*":
+                comment_depth += 1
+                result.extend([" ", " "])
+                skip_to = idx + 2
+            elif pair == "*/":
+                comment_depth -= 1
+                result.extend([" ", " "])
+                skip_to = idx + 2
+            else:
+                result.append("\n" if char == "\n" else " ")
+        elif string_closing != None:
+            if contents[idx:idx + len(string_closing)] == string_closing:
+                result.extend([" "] * len(string_closing))
+                skip_to = idx + len(string_closing)
+                string_closing = None
+            elif char == "\\" and idx + 1 < len(contents):
+                hashes = 0 if string_closing.startswith("/") else string_closing.count("#")
+                escape_len = 1 + hashes
+                if contents[idx + 1:idx + escape_len] == "#" * hashes and idx + escape_len < len(contents):
+                    for escaped_idx in range(idx, idx + escape_len + 1):
+                        result.append("\n" if contents[escaped_idx] == "\n" else " ")
+                    skip_to = idx + escape_len + 1
+                    if contents[idx + escape_len] == "(" and not string_closing.startswith("/"):
+                        interpolation_stack.append((string_closing, interpolation_depth))
+                        string_closing = None
+                        interpolation_depth = 1
+                else:
+                    result.append(" ")
+            else:
+                result.append("\n" if char == "\n" else " ")
+        elif pair == "//":
+            end = contents.find("\n", idx)
+            if end < 0:
+                end = len(contents)
+            result.extend([" "] * (end - idx))
+            skip_to = end
+        elif pair == "/*":
+            comment_depth = 1
+            result.extend([" ", " "])
+            skip_to = idx + 2
+        elif interpolation_depth and char == "(":
+            interpolation_depth += 1
+            result.append(" ")
+        elif interpolation_depth and char == ")":
+            interpolation_depth -= 1
+            result.append(" ")
+            if interpolation_depth == 0:
+                string_closing, interpolation_depth = interpolation_stack.pop()
+        elif char == '"' or char == "#" or char == "/":
+            # A raw string has one or more hashes immediately before its quote.
+            hashes = 0
+            if char == "#":
+                for hidx in range(idx, len(contents)):
+                    if contents[hidx] != "#":
+                        break
+                    hashes += 1
+            quote_idx = idx + hashes
+            if quote_idx < len(contents) and contents[quote_idx] == '"':
+                triple = contents[quote_idx:quote_idx + 3] == '"""'
+                opening = hashes + (3 if triple else 1)
+                string_closing = ('"""' if triple else '"') + "#" * hashes
+                result.extend([" "] * opening)
+                skip_to = idx + opening
+            elif quote_idx < len(contents) and contents[quote_idx] == "/" and (hashes or (char == "/" and idx + 1 < len(contents) and contents[idx + 1] not in " \t\r\n/*" and (idx == 0 or contents[idx - 1] in " \t\r\n=(:,[") and _has_closing_bare_regex(contents, idx))):
+                string_closing = "/" + "#" * hashes
+                result.extend([" "] * (hashes + 1))
+                skip_to = idx + hashes + 1
+            else:
+                result.append(" " if interpolation_depth else char)
+        else:
+            result.append(" " if interpolation_depth else char)
+    return "".join(result)
+
+def _collect_imports(contents):
+    """Collects lexical Swift imports from all conditional compilation branches.
+
+    Each result has `module_name`, 1-based `line_number`, and `is_conditional`.
+    This does not evaluate compilation conditions or resolve SDK modules. Bare
+    slash regexes are recognized only in common expression-start contexts;
+    this is a lexical scan, not a full Swift parser.
+    """
+    masked = _masked_swift_source(contents)
+    imports = []
+    conditional_depth = 0
+    line_start = 0
+    for line_idx, line in enumerate(masked.split("\n")):
+        line_number = line_idx + 1
+        current_line_start = line_start
+        line_start += len(line) + 1
+        stripped = line.strip()
+        if stripped.startswith("#if") and (len(stripped) == 3 or not _is_identifier_char(stripped[3])):
+            conditional_depth += 1
+            continue
+        if stripped.startswith("#endif"):
+            conditional_depth -= 1
+            continue
+        if stripped.startswith("#elseif") or stripped.startswith("#else"):
+            continue
+        for start in range(len(line)):
+            if line[start:start + 6] != "import":
+                continue
+            end = start + len("import")
+            if (start > 0 and _is_identifier_char(line[start - 1])) or (end < len(line) and _is_identifier_char(line[end])):
+                continue
+            if current_line_start + end >= len(masked) or masked[current_line_start + end] not in " \t\r\n":
+                continue
+            module = _import_module_after(masked, current_line_start + end)
+            if module != None:
+                imports.append(struct(
+                    module_name = module,
+                    line_number = line_number,
+                    is_conditional = conditional_depth > 0,
+                ))
+    return imports
+
+def _import_module_after(contents, start):
+    """Reads the root module after an import keyword in masked source."""
+    next_idx = len(contents)
+    for idx in range(start, len(contents)):
+        if contents[idx] not in " \t\r\n":
+            next_idx = idx
+            break
+    if next_idx == len(contents):
+        return None
+    words = []
+    for _ in range(2):
+        if next_idx >= len(contents):
+            break
+        if contents[next_idx] == "`":
+            close = contents.find("`", next_idx + 1)
+            if close < 0:
+                break
+            words.append(contents[next_idx + 1:close])
+            next_idx = close + 1
+        else:
+            word_end = next_idx
+            for idx in range(next_idx, len(contents)):
+                if not _is_identifier_char(contents[idx]):
+                    break
+                word_end = idx + 1
+            if word_end == next_idx:
+                break
+            words.append(contents[next_idx:word_end])
+            next_idx = word_end
+        if words[0] not in ["typealias", "struct", "class", "enum", "protocol", "let", "var", "func"]:
+            break
+        for idx in range(next_idx, len(contents)):
+            if contents[idx] not in " \t\r\n":
+                next_idx = idx
+                break
+    if len(words) == 2:
+        return words[1]
+    if words and words[0] not in ["typealias", "struct", "class", "enum", "protocol", "let", "var", "func"]:
+        return words[0]
+    return None
+
 swift_files = struct(
+    collect_imports = _collect_imports,
     has_import = _has_import,
     has_objc_directive = _has_objc_directive,
 )

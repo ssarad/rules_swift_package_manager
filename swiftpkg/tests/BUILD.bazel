@@ -4,6 +4,7 @@ load(":artifact_infos_tests.bzl", "artifact_infos_test_suite")
 load(":bazel_apple_platforms_tests.bzl", "bazel_apple_platforms_test_suite")
 load(":bazel_repo_names_tests.bzl", "bazel_repo_names_test_suite")
 load(":bazel_target_mods_tests.bzl", "bazel_target_mods_test_suite")
+load(":binary_target_deps_tests.bzl", "binary_target_deps_test_suite")
 load(":bools_tests.bzl", "bools_test_suite")
 load(":build_decls_tests.bzl", "build_decls_test_suite")
 load(":build_files_tests.bzl", "build_files_test_suite")
@@ -44,6 +45,8 @@ bazel_apple_platforms_test_suite()
 bazel_repo_names_test_suite()
 
 bazel_target_mods_test_suite()
+
+binary_target_deps_test_suite()
 
 bools_test_suite()
 

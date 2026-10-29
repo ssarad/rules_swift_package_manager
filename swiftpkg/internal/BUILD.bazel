@@ -269,18 +269,28 @@ bzl_library(
     deps = [
         ":artifact_infos",
         ":bazel_target_mods",
+        ":binary_target_deps",
         ":build_files",
+        ":manual_target_deps",
         ":pkg_ctxs",
+        ":pkginfo_targets",
         ":pkginfos",
         ":repository_files",
         ":spm_versions",
         ":starlark_codegen",
+        ":swift_files",
         ":swiftpkg_build_files",
         "@bazel_skylib//lib:dicts",
         "@bazel_skylib//lib:paths",
         "@bazel_skylib//lib:versions",
         "@bazel_tools//tools/build_defs/repo:utils.bzl",
     ],
+)
+
+bzl_library(
+    name = "binary_target_deps",
+    srcs = ["binary_target_deps.bzl"],
+    visibility = ["//swiftpkg:__subpackages__"],
 )
 
 bzl_library(

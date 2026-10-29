@@ -23,7 +23,7 @@ load(":starlark_codegen.bzl", scg = "starlark_codegen")
 
 # MARK: - Target Entry Point
 
-def _new_for_target(repository_ctx, pkg_ctx, target, artifact_infos = []):
+def _new_for_target(repository_ctx, pkg_ctx, target, artifact_infos = [], inferred_binary_deps = []):
     if target.module_type == module_types.clang:
         return _clang_target_build_file(repository_ctx, pkg_ctx, target)
     elif target.module_type == module_types.swift:
@@ -37,7 +37,7 @@ def _new_for_target(repository_ctx, pkg_ctx, target, artifact_infos = []):
             lambda ai: ai.artifact_type == artifact_types.xcframework,
         )
         if xcf_artifact_info != None:
-            return _xcframework_import_build_file(pkg_ctx, target, xcf_artifact_info)
+            return _xcframework_import_build_file(pkg_ctx, target, xcf_artifact_info, inferred_binary_deps)
 
     # GH046: Support plugins.
     return None
@@ -987,7 +987,7 @@ def _system_library_build_file(repository_ctx, pkg_ctx, target):
 
 # MARK: - Apple xcframework Targets
 
-def _xcframework_import_build_file(pkg_ctx, target, artifact_info):
+def _xcframework_import_build_file(pkg_ctx, target, artifact_info, inferred_binary_deps = []):
     public_label_name = pkginfo_targets.bazel_label_name(target)
     implementation_label_name = pkginfo_targets.implementation_label_name(public_label_name)
     attrs = {}
@@ -1022,7 +1022,18 @@ expected: {expected}\
         "glob",
         ["{xcframework_path}/**".format(xcframework_path = artifact_info.path)],
     )
-    deps = manual_target_deps.deps_for_target(pkg_ctx, target)
+    inferred_labels = [
+        ":{}".format(pkginfo_targets.bazel_label_name(pkginfo_targets.get(pkg_ctx.pkg_info.targets, name)))
+        for name in inferred_binary_deps
+    ]
+    deps = list(manual_target_deps.deps_for_target(pkg_ctx, target))
+
+    # Root-package absolute and relative labels identify the same sibling.
+    seen_deps = {label.removeprefix("//") if label.startswith("//:") else label: True for label in deps}
+    for label in inferred_labels:
+        if label not in seen_deps:
+            seen_deps[label] = True
+            deps.append(label)
     if deps:
         attrs["deps"] = deps
     decls = [

@@ -6,11 +6,15 @@ load("@bazel_skylib//lib:versions.bzl", "versions")
 load("@bazel_tools//tools/build_defs/repo:utils.bzl", "read_netrc", "read_user_netrc", "use_netrc")
 load(":artifact_infos.bzl", "artifact_infos")
 load(":bazel_target_mods.bzl", "bazel_target_mods")
+load(":binary_target_deps.bzl", "binary_target_deps")
 load(":build_files.bzl", "build_files")
+load(":manual_target_deps.bzl", "manual_target_deps")
+load(":pkginfo_targets.bzl", "pkginfo_targets")
 load(":pkginfos.bzl", "target_types")
 load(":repository_files.bzl", "repository_files")
 load(":spm_versions.bzl", "spm_versions")
 load(":starlark_codegen.bzl", scg = "starlark_codegen")
+load(":swift_files.bzl", "swift_files")
 load(":swiftpkg_build_files.bzl", "swiftpkg_build_files")
 
 _swift_attrs = {
@@ -28,7 +32,7 @@ direct users should prefer that typed API.\
     ),
     "binary_target_deps": attr.bool(
         default = False,
-        doc = "Effective binary-target dependency inference setting. Reserved; does not generate dependencies yet.",
+        doc = "Infer sibling XCFramework dependencies from public Swift interfaces when every slice supports the import.",
     ),
     "dep_module_aliases": attr.string(
         doc = """\
@@ -177,6 +181,24 @@ BUILD file override bypasses generated declarations.\
 
     pkg_info = pkg_ctx.pkg_info
 
+    artifacts_by_target = {}
+    for target in pkg_info.targets:
+        if target.type == target_types.binary:
+            artifacts_by_target[target.name] = _artifact_infos_from_path(repository_ctx, target.path)
+
+    inferred_binary_deps = {}
+    if getattr(pkg_ctx, "binary_target_deps", False):
+        metadata = [
+            _binary_target_metadata(repository_ctx, target, artifacts_by_target[target.name])
+            for target in pkg_info.targets
+            if target.type == target_types.binary
+        ]
+        result = binary_target_deps.infer(metadata, _manual_binary_edges(pkg_ctx))
+        inferred_binary_deps = result.deps
+        for diagnostic in result.diagnostics:
+            # buildifier: disable=print
+            print("WARNING: {}".format(diagnostic))
+
     bld_files = []
 
     licenses = repository_files.find_license_files(repository_ctx)
@@ -196,18 +218,14 @@ BUILD file override bypasses generated declarations.\
         if target.type == "test":
             continue
 
-        artifact_infos = []
-        if target.type == target_types.binary:
-            artifact_infos = _artifact_infos_from_path(
-                repository_ctx,
-                target.path,
-            )
+        artifact_infos = artifacts_by_target.get(target.name, [])
 
         bld_file = swiftpkg_build_files.new_for_target(
             repository_ctx,
             pkg_ctx,
             target,
             artifact_infos,
+            inferred_binary_deps = inferred_binary_deps.get(target.name, []),
         )
 
         if bld_file == None:
@@ -310,6 +328,66 @@ WARNING: Found multiple XCFramework binary artifacts in the downloaded artifact:
         artifact_infos.new_xcframework_info_from_files(repository_ctx, xf)
         for xf in xcframework_dirs
     ]
+
+def _binary_target_metadata(repository_ctx, target, artifacts):
+    xcframework = None
+    for artifact in artifacts:
+        if artifact.artifact_type == "xcframework":
+            xcframework = artifact
+            break
+    if xcframework == None:
+        return struct(name = target.name, module_name = None, complete = False, slices = [])
+    slices = []
+    module_names = {}
+    complete = bool(xcframework.framework_infos)
+    for framework in sorted(xcframework.framework_infos, key = lambda info: info.path):
+        interfaces = []
+        if not framework.path.endswith(".framework"):
+            complete = False
+        else:
+            for path in sorted(repository_files.list_files_under(repository_ctx, framework.path, by_name = "*.swiftinterface", depth = 3)):
+                basename = paths.basename(path)
+                if basename.endswith(".private.swiftinterface") or basename.endswith(".package.swiftinterface"):
+                    continue
+                triple_parts = basename.removesuffix(".swiftinterface").split("-")
+                if len(triple_parts) < 3 or not triple_parts[0] or triple_parts[1] != "apple" or not triple_parts[2]:
+                    complete = False
+                module_dir = paths.basename(paths.dirname(path))
+                if not module_dir.endswith(".swiftmodule") or paths.basename(paths.dirname(paths.dirname(path))) != "Modules":
+                    continue
+                module_name = module_dir.removesuffix(".swiftmodule")
+                module_names[module_name] = True
+                interfaces.append(struct(
+                    basename = basename,
+                    path = path,
+                    imports = swift_files.collect_imports(repository_ctx.read(path)),
+                ))
+        if not interfaces:
+            complete = False
+        slices.append(struct(name = paths.basename(paths.dirname(framework.path)), interfaces = interfaces))
+    if len(module_names) != 1:
+        complete = False
+    module_name = sorted(module_names)[0] if len(module_names) == 1 else None
+    return struct(name = target.name, module_name = module_name, complete = complete, slices = slices)
+
+def _manual_binary_edges(pkg_ctx):
+    edges = {}
+    binary_targets = [target for target in pkg_ctx.pkg_info.targets if target.type == target_types.binary]
+    for target in binary_targets:
+        deps = manual_target_deps.deps_for_target(pkg_ctx, target)
+        edges[target.name] = [
+            candidate.name
+            for candidate in binary_targets
+            if candidate.name != target.name and any([
+                dep in [
+                    prefix + name
+                    for prefix in [":", "//:"]
+                    for name in [pkginfo_targets.bazel_label_name(candidate), pkginfo_targets.implementation_label_name(pkginfo_targets.bazel_label_name(candidate))]
+                ]
+                for dep in deps
+            ])
+        ]
+    return edges
 
 # Copied from "@bazel_tools//tools/build_defs/repo:utils.bzl". Availaible starting with 7.1.0
 def _get_auth(ctx, urls):

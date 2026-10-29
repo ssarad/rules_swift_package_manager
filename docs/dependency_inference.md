@@ -1,10 +1,26 @@
-# Dependency inference configuration (part 2)
+# Dependency inference
 
-This release establishes configuration for future dependency inference. **Neither
-setting currently scans imports or changes generated dependencies**, even when
-set to `True` or `"on"`. Continue supplying missing dependencies with
-`configure_package(target_deps = ...)`. Compiler features remain independently
-configured as described in the [migration notes](rules_swift_4_migration.md).
+`binary_target_deps` can infer dependencies among binary XCFramework targets in
+the same Swift package. `system_sdk_deps` remains reserved and does not change
+generated dependencies. Compiler features remain independently configured as
+described in the [migration notes](rules_swift_4_migration.md).
+
+When enabled, inference reads public `.swiftinterface` files from every
+framework slice under `Modules/<Module>.swiftmodule/`. It adds a sibling binary
+target dependency only when the import is unconditional in every public
+interface, the sibling has an unambiguous module name, and the sibling provides
+each interface architecture/platform basename used by the importer. The
+imported module name comes from the framework's Swift module directory, which
+may differ from its Swift package target name. Inference does not read private
+or package interfaces, headers, or module maps, and does not infer SDK or
+external package dependencies. Header-only frameworks and XCFrameworks with
+missing or inconsistent public interfaces still need manual `target_deps`.
+Public interface filenames must carry a target triple such as
+`arm64-apple-ios.swiftinterface` so platform coverage can be checked.
+Skipped targets and sibling matches produce warnings, including the source
+interface and line when available.
+Inferred cycles fail generation with the dependency chain and provenance.
+Inference is conservative for conditional and platform-specific imports.
 
 ## Root defaults and package overrides
 
@@ -87,12 +103,11 @@ That mapping does not transfer ownership of SDK configuration: only the
 consuming root module configures SDKs and exclusions. Explicit exclusions replace
 rules_swift's defaults, as documented in the migration notes.
 
-No inventory file is consumed, SDK repository mapping added, or compiler scanner
-invoked by this change. Once the upstream contract is agreed and available,
+No inventory file is consumed or SDK repository mapping added by this change.
+Once the upstream contract is agreed and available,
 part 3 can collect source imports, resolve platform-specific SDK labels, account
 for generated resource accessors, and test builds with
-`swift.add_default_precompiled_modules` disabled. Binary-framework inference is
-a separate follow-up using its independent setting.
+`swift.add_default_precompiled_modules` disabled.
 
 See the [part 2 plan](https://github.com/cgrindel/rules_swift_package_manager/pull/2576#issuecomment-6191433506)
 and the [original proposal](https://github.com/cgrindel/rules_swift_package_manager/discussions/2488).
